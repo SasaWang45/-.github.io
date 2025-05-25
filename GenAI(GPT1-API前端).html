@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI警察对话</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    #ChatFlow {
+      border: 1px solid #ccc; height: 400px; overflow-y: auto;
+      padding: 10px; margin-bottom: 10px; display: flex; flex-direction: column;
+    }
+    .chatbox { margin: 5px 0; padding: 10px; border-radius: 8px; max-width: 70%; display: flex; align-items: center; }
+    .chatbox img { width: 30px; height: 30px; border-radius: 50%; margin-right: 10px; }
+    .user { background-color: #ffffff; align-self: flex-end; flex-direction: row-reverse; }
+    .ai { background-color: #eeeeee; align-self: flex-start; }
+    #UserInput_Textarea { width: 100%; height: 50px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <div id="ChatFlow"></div>
+  <textarea id="UserInput_Textarea" placeholder="输入你的回答，按回车发送"></textarea>
+
+  <script>
+    const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
+    const DEEPSEEK_API_KEY = "sk-3ebba13687c44b2cb486b78cde899455"; // ← 替换为你自己的
+
+    const misleadingQuestions = [
+      "抢匪把收银员处的现金放进背包后，是否试图偷取其他物品？",
+      "抢匪下车的商店门前是否安装了监控摄像头？",
+      "当被纹身抢匪威胁时，正在付款的顾客是否趴倒在地？",
+      "当抢匪挥舞刀具时，那名男顾客是否进行了反抗？",
+      "收银员在被用枪威胁后，是否将钱交给了穿棕色连帽衫的抢匪？"
+    ];
+
+    let conversation_history = [];
+    let total_dialogue = 0;
+    let current_question = "";
+    let isProcessing = false;
+    let subject_id = "";
+    let current_question_time = null;
+    let has_exported = false;
+    let intro_step = 0;
+
+    const questionList = [
+      "欢迎",
+      "准备",
+      "抢匪把收银员处的现金放进背包后，是否试图偷取其他物品？",
+      "店内是否安装了监视屏幕(CCTV)？",
+      "穿绿色连帽衫的抢匪是否携带霰弹枪作为武器？",
+      "抢匪进入商店前，外面是否天黑了？",
+      "抢匪下车的商店门前是否安装了监控摄像头？",
+      "在抢劫期间，店内的物品是否受到明显损坏？",
+      "在抢劫过程中，收银员或顾客是否试图打电话？",
+      "抢劫正在进行时，是否有毫不知情的新顾客进入商店？",
+      "当抢匪进入时，收银台前是否有女性顾客？",
+      "当被纹身抢匪威胁时，正在付款的顾客是否趴倒在地？",
+      "当抢匪挥舞刀具时，那名男顾客是否进行了反抗？",
+      "抢劫发生时，是否有安保人员在场？",
+      "抢劫过程中，是否有抢匪试图偷取店内自动取款机里的钱？",
+      "抢劫期间，是否有顾客显得惊慌失措？",
+      "是否有抢匪携带比一件更多的枪械？",
+      "穿灰色连帽衫的抢匪进入店后，是否试图锁上店门？",
+      "收银员在被用枪威胁后，是否将钱交给了穿棕色连帽衫的抢匪？",
+      "抢劫过程中，是否有顾客逃离或离开了商店？",
+      "从抢匪的行为来看，他们是否似乎有抢劫商店的经验？",
+      "抢劫发生时，一名女收银员是否正在收银台为顾客收银？",
+      "抢劫期间，该女收银员是否逃到了店铺后方？",
+      "是否有一名抢匪跳过收银台进入收银员所在的收银区？",
+      "店内是否配备有紧急电话？",
+      "是否有抢匪看起来未满18岁？",
+      "除了威胁顾客外，是否有抢匪实际开枪？",
+      "在提问过程中，您是否遇到任何技术问题？",
+      "结束"
+    ];
+
+    function call_DeepSeek(promptText, callback) {
+      const payload = {
+        model: "deepseek-chat",
+        messages: [{ role: "user", content: promptText }],
+        temperature: 0.7,
+        max_tokens: 1024,
+        stream: false
+      };
+
+      fetch(DEEPSEEK_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${DEEPSEEK_API_KEY}`
+        },
+        body: JSON.stringify(payload)
+      })
+      .then(async response => {
+        if (!response.ok) throw new Error("HTTP error! status: " + response.status);
+        return response.json();
+      })
+      .then(data => {
+        const reply = data.choices[0].message.content;
+        callback(reply);
+      })
+      .catch(error => {
+        console.error("❌ DeepSeek 出错:", error);
+        callback("系统暂时无法响应，请继续回答问题。");
+      });
+    }
+
+    function generateFeedback(answer) {
+      const isYes = answer.includes("是");
+      let prompt = `你是AI警官，请根据以下内容生成简洁的警方反馈，不使用markdown、不含案件编号、日期、单位等字段。
+要求：
+1. 只输出3到4句话自然语言反馈；
+2. 不要格式化内容（例如加粗、编号、标题）；
+3. 避免官话套话（如“感谢您的配合”、“联系方式请联系办案人员”）；
+4. 保持语言客观、具体、有洞察力；
+5. 若回答为“是”，使用正面反馈语句；若为“否”，使用中性或谨慎反馈；
+6. 如果问题属于关键细节，请强调该信息的重要性。
+
+用户回答是：“${answer}”
+问题类型：${misleadingQuestions.includes(current_question) ? "关键细节" : "常规问题"}
+请输出反馈内容：`;
+
+      call_DeepSeek(prompt, (response) => {
+        setTimeout(() => {
+          add_other_bubble(response);
+          setTimeout(() => proceedToNext(), 1000);
+        }, 1000);
+      });
+    }
+
+    function handleUserResponse(userAnswer) {
+      const rt = current_question_time ? Date.now() - current_question_time : "";
+
+      conversation_history.push({
+        role: "user",
+        content: userAnswer,
+        question: current_question,
+        rt: rt
+      });
+
+      if (misleadingQuestions.includes(current_question)) {
+        generateFeedback(userAnswer);
+      } else {
+        proceedToNext();
+      }
+    }
+
+    function proceedToNext() {
+      total_dialogue++;
+      isProcessing = false;
+
+      if (total_dialogue >= questionList.length) {
+        if (!has_exported) {
+          has_exported = true;
+          setTimeout(() => {
+            add_other_bubble("感谢您的配合！数据导出中...");
+            exportToCSV();
+          }, 1000);
+        }
+        return;
+      }
+      askNextQuestion();
+    }
+
+    function askNextQuestion() {
+      if (total_dialogue >= questionList.length) return;
+
+      current_question = questionList[total_dialogue];
+      current_question_time = Date.now();
+
+      if (current_question === "欢迎") {
+        add_other_bubble("您好！我是一名AI警察，我的任务是评估用户在犯罪现场表现出负责任的公民和可靠证人的素质的能力。我将向您询问几个问题，并引导您完成整个过程。");
+        setTimeout(() => add_other_bubble("请输入您的编号。"), 1000);
+      } else if (current_question === "准备") {
+        add_other_bubble("谢谢，请输入 ok 开始回答问题。");
+      } else if (current_question === "结束") {
+        add_other_bubble("感谢您的配合！请联系主试开启下一步实验。收到请回复“ok”。");
+      } else {
+        const delay = total_dialogue === 2 ? 2500 : 0;
+        setTimeout(() => add_other_bubble(current_question), delay);
+      }
+
+      conversation_history.push({ role: "assistant", content: current_question });
+    }
+
+    function exportToCSV() {
+      let csvContent = "\uFEFF被试编号,问题,用户回答,反应时间(ms)\n";
+
+      conversation_history.forEach((entry, index) => {
+        if (entry.role === "assistant" && !["欢迎", "准备"].includes(entry.content)) {
+          const nextEntry = conversation_history[index + 1];
+          if (nextEntry && nextEntry.role === "user") {
+            csvContent += `${subject_id},"${entry.content}","${nextEntry.content}",${nextEntry.rt || ""}\n`;
+          }
+        }
+      });
+
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `${subject_id}_responses.csv`);
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 100);
+    }
+
+    function conversation_control(userAnswer = "") {
+      if (isProcessing) return;
+
+      if (userAnswer) {
+        if (intro_step === 0) {
+          subject_id = userAnswer;
+          intro_step = 1;
+          total_dialogue++;
+          askNextQuestion();
+          return;
+        }
+        if (intro_step === 1 && userAnswer.toLowerCase() === "ok") {
+          intro_step = 2;
+          total_dialogue++;
+          askNextQuestion();
+          return;
+        }
+
+        isProcessing = true;
+        add_user_bubble(userAnswer);
+        handleUserResponse(userAnswer);
+      } else {
+        if (intro_step === 0) {
+          askNextQuestion();
+          intro_step = 0;
+        }
+      }
+    }
+
+    document.getElementById("UserInput_Textarea").onkeypress = function(e) {
+      if (e.key === "Enter" && !isProcessing) {
+        e.preventDefault();
+        const user_input = e.target.value.trim();
+        if (user_input) {
+          this.disabled = true;
+          this.value = "";
+          conversation_control(user_input);
+          setTimeout(() => this.disabled = false, 1500);
+        }
+      }
+    };
+
+    function add_user_bubble(msg) {
+      const div = document.createElement("div");
+      div.className = "chatbox user";
+      div.innerHTML = `<img src="https://cdn-icons-png.flaticon.com/512/847/847969.png" alt="User"> <span>${msg}</span>`;
+      document.getElementById("ChatFlow").appendChild(div);
+      document.getElementById("ChatFlow").scrollTop = document.getElementById("ChatFlow").scrollHeight;
+    }
+
+    function add_other_bubble(msg) {
+      const div = document.createElement("div");
+      div.className = "chatbox ai";
+      div.innerHTML = `<img src="https://cdn-icons-png.flaticon.com/512/4712/4712109.png" alt="AI"> <span>${msg}</span>`;
+      document.getElementById("ChatFlow").appendChild(div);
+      document.getElementById("ChatFlow").scrollTop = document.getElementById("ChatFlow").scrollHeight;
+    }
+
+    window.onload = () => conversation_control();
+  </script>
+</body>
+</html>
